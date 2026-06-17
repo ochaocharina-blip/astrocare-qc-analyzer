@@ -1964,12 +1964,27 @@ function chkEstimation(agentTurns, agentText) {
     'menghubungi kakak kembali','menghubungi kakak lebih lanjut',
     'kami informasikan kembali','kami sampaikan kembali',
   ];
+  // FIX (#413338): Internal coordination dengan tim Hub belum punya SLA standar,
+  // jadi agent ga bisa janjikan estimasi konkret. Treat sebagai valid deferred FU.
+  const hubCoordKeywords = [
+    'akan konfirmasi ke hub','akan kami konfirmasi ke hub','akan kami konfirmasikan ke hub',
+    'kami konfirmasi ke hub','kami koordinasi ke hub','kami koordinasikan ke hub',
+    'akan kami koordinasikan dengan tim hub','akan kami koordinasi dengan tim hub',
+    'koordinasi dengan tim hub','koordinasi ke tim hub','konfirmasi ke tim hub',
+    'cek ke tim hub','cek ke hub','pengecekan ke hub','pengecekan ke tim hub',
+    'koordinasi dengan tim terkait','koordinasi ke tim terkait','konfirmasi ke tim terkait',
+    'akan kami koordinasikan dengan tim terkait','sampaikan ke tim terkait',
+    'tim hub','tim warehouse','tim md','tim merchant',
+  ];
   const hasDeferredFU = hasAny(agentText, deferredFUKeywords);
-  const pass = hasPattern(agentText, patterns) || hasAny(agentText, keywords) || hasDeferredFU;
-  const evidence = pass ? findEvidence(agentTurns, [...keywords, ...deferredFUKeywords, '24 jam','hari kerja','1x24']) : null;
-  const detail = hasDeferredFU
-    ? 'Agent menyebut deferred follow-up ("tim akan menghubungi lebih lanjut") — diterima sebagai bentuk estimasi yang valid untuk konteks inquiry non-time-bound.'
-    : (pass ? 'Estimasi waktu disampaikan dengan jelas.' : 'Tidak ada informasi estimasi waktu penyelesaian/pengiriman, dan tidak ada deferred follow-up (mis. "tim kami akan menghubungi Kakak lebih lanjut").');
+  const hasHubCoord = hasAny(agentText, hubCoordKeywords);
+  const pass = hasPattern(agentText, patterns) || hasAny(agentText, keywords) || hasDeferredFU || hasHubCoord;
+  const evidence = pass ? findEvidence(agentTurns, [...keywords, ...deferredFUKeywords, ...hubCoordKeywords, '24 jam','hari kerja','1x24']) : null;
+  const detail = hasHubCoord
+    ? 'Agent menyebut koordinasi internal ke tim Hub/Warehouse/MD — diterima karena SLA pengecekan tim internal belum di-standarisasi. Estimasi konkret belum bisa diberikan.'
+    : (hasDeferredFU
+        ? 'Agent menyebut deferred follow-up ("tim akan menghubungi lebih lanjut") — diterima sebagai bentuk estimasi yang valid untuk konteks inquiry non-time-bound.'
+        : (pass ? 'Estimasi waktu disampaikan dengan jelas.' : 'Tidak ada informasi estimasi waktu penyelesaian/pengiriman, dan tidak ada deferred follow-up (mis. "tim kami akan menghubungi Kakak lebih lanjut").'));
   return { pass, label:'Estimasi Waktu', tag:'#LessInfo', deduct:10, evidence, detail };
 }
 
@@ -2934,6 +2949,25 @@ const NO_RESPONSE_CLOSURE_PATTERNS = [
   'sesi akan kami akhiri',
 ];
 
+// FIX (#410191): Helper — cek apakah turn customer cuma berisi nomor invoice/kode
+// tanpa detail kendala konkret. Pattern: INV/AS/YYYYMMDD/.../... atau angka panjang.
+function _isInvoiceOnlyTurn(text) {
+  const t = (text || '').trim();
+  if (!t) return true;
+  // Strip patterns invoice + kode pesanan + nomor panjang
+  const stripped = t
+    .replace(/INV\/AS\/[\d\/]+/gi, '')          // invoice format
+    .replace(/\b\d{6,}\b/g, '')                   // nomor panjang (>=6 digit)
+    .replace(/[^\w\s]/g, ' ')                     // strip punctuation
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Kalau setelah strip masih < 15 chars atau < 4 kata → ini cuma invoice/kode
+  if (stripped.length < 15) return true;
+  const remainingWords = stripped.split(/\s+/).filter(w => w.length > 1);
+  if (remainingWords.length < 4) return true;
+  return false;
+}
+
 function detectNoResponseClosure(rawText, agentTurns, customerTurns) {
   if (!rawText) return { isNoResponseClosure: false };
   const rawLow = rawText.toLowerCase();
@@ -2943,11 +2977,14 @@ function detectNoResponseClosure(rawText, agentTurns, customerTurns) {
   if (!triggered) return { isNoResponseClosure: false };
 
   // 2. Cek customer benar-benar minim engagement
-  // Substantive customer turn = pesan dengan >= 3 kata text murni (bukan upload/ack singkat)
+  // Substantive customer turn = pesan dengan >= 3 kata text murni
+  // FIX (#410191): exclude turn yg cuma berisi invoice/kode pesanan
+  // (customer kasih invoice doang tanpa detail kendala — agent ga bisa solve apa-apa)
   const customerSubstantive = (customerTurns || []).filter(t => {
     const txt = (t.text || '').trim();
     if (!txt) return false;
     if (/uploaded:|attachment/i.test(txt)) return false; // hanya upload file
+    if (_isInvoiceOnlyTurn(txt)) return false;            // hanya invoice/kode, no detail
     const wordCount = txt.split(/\s+/).length;
     return wordCount >= 3;
   });
