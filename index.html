@@ -5004,6 +5004,153 @@ function buildSheet3(list) {
   return ws;
 }
 
+// ── BUILD SHEET 4: ASTRO QC FORMAT (matches QC CCU 2026 Excel) ──────
+function buildSheet4Astro(list) {
+  const HEADERS = [
+    'Timestamp',
+    'Agent Name',
+    'Invoice (Please Fill the Whole Invoice Number)',
+    'Service Attitude',
+    'Service Attitude - Description & Proof',
+    'Probing',
+    'Probing - Description & Proof',
+    'Problem Comprehension',
+    'Problem Comprehension - Description & Proof',
+    'Solution',
+    'Solution - Description & Proof',
+    'Tools & Procedures',
+    'Tools & Procedures - Description & Proof',
+    'Zero Tolerance',
+    'Zero Tolerance - Description & Proof',
+  ];
+
+  // Map QC engine tag → Astro Score Card category (per PDF Score Cards)
+  const CATEGORY_MAP = {
+    // Service Attitude (5%)
+    '#ImproperGreeting': 'Service Attitude',
+    '#Typo': 'Service Attitude',
+    '#Jargon': 'Service Attitude',
+    '#Apathy': 'Service Attitude',
+    '#Impolite': 'Service Attitude',
+    // Probing (20%)
+    '#MandatoryProb': 'Probing',
+    '#RedundantQuestion': 'Probing',
+    // Problem Comprehension (20%)
+    '#Historical': 'Problem Comprehension',
+    '#NotAcknowledge': 'Problem Comprehension',
+    '#ClosingMssge': 'Problem Comprehension',
+    // Solutions (40%)
+    '#LessInfo': 'Solution',
+    '#WordingJaminanGaransi': 'Solution',
+    '#WrongInfo': 'Solution',
+    '#WrongEscalation': 'Solution',
+    '#NoEscalation': 'Solution',
+    '#NoNeedEscalation': 'Solution',
+    '#InvalidDataEscalation': 'Solution',
+    '#MissingFollowup': 'Solution',
+    '#EstimationMissing': 'Solution',
+    // Tools & Procedures (15%)
+    '#MandatoryField': 'Tools & Procedures',
+    '#OrderDetail': 'Tools & Procedures',
+    '#CaseDetail': 'Tools & Procedures',
+    '#ClosingTooSoon': 'Tools & Procedures',
+    '#IdleTimeout': 'Tools & Procedures',
+    // Zero Tolerance (only true fraud / extreme violation)
+    '#FinancialLost': 'Zero Tolerance',
+    '#KPIManipulations': 'Zero Tolerance',
+    '#PrivacyPolicies': 'Zero Tolerance',
+    '#11Attitude': 'Zero Tolerance',
+    '#Rude': 'Zero Tolerance',
+  };
+
+  const CATEGORIES = ['Service Attitude','Probing','Problem Comprehension','Solution','Tools & Procedures','Zero Tolerance'];
+
+  function stripHTML(s) {
+    if (!s) return '';
+    return String(s).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  function buildRow(s) {
+    const d = new Date(s.createdAt || s.date || Date.now());
+    const timestamp = d.toLocaleString('id-ID', {
+      year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false
+    });
+    const agentName = s.agentName || '—';
+    const invoice = s.ticketNumber || s.invoice || (s.metadata && s.metadata.invoice) || '—';
+
+    const violations = [...(s.violations || []), ...((s.aiResult && s.aiResult.violations) || [])];
+    const byCategory = {};
+    for (const v of violations) {
+      const tag = v.tag || v.hashtag;
+      if (!tag) continue;
+      if (v.pass === true) continue;
+      const cat = CATEGORY_MAP[tag];
+      if (!cat) continue;
+      if (!byCategory[cat]) byCategory[cat] = [];
+      const evidence = stripHTML(v.evidence || '').substring(0, 250);
+      const detail = stripHTML(v.detail || v.label || '').substring(0, 250);
+      let text;
+      if (evidence && detail) text = `${tag}: "${evidence}" — ${detail}`;
+      else if (evidence) text = `${tag}: "${evidence}"`;
+      else if (detail) text = `${tag}: ${detail}`;
+      else text = `${tag}`;
+      byCategory[cat].push(text);
+    }
+
+    const row = [timestamp, agentName, invoice];
+    for (const cat of CATEGORIES) {
+      const findings = byCategory[cat] || [];
+      if (findings.length === 0) {
+        row.push('Yes');
+        row.push('');
+      } else {
+        row.push('No');
+        row.push(findings.join('\n\n'));
+      }
+    }
+    return row;
+  }
+
+  const headerStyle = xlCellStyle({ bold:true, sz:10, bgColor:'1A5490', fgColor:'FFFFFF', center:true });
+  const yesStyle = xlCellStyle({ bgColor:'D4F4DD', center:true, bold:true, fgColor:'0A6640' });
+  const noStyle = xlCellStyle({ bgColor:'FFE5E5', center:true, bold:true, fgColor:'8B0000' });
+  const descStyle = xlCellStyle({ bgColor:'FFF8DC' });
+  const idStyle = xlCellStyle({ bgColor:'F5F5F5' });
+
+  const ws = {};
+  HEADERS.forEach((h, ci) => {
+    ws[XLSX.utils.encode_cell({r:0, c:ci})] = { v: h, t: 's', s: headerStyle };
+  });
+
+  list.forEach((s, ri) => {
+    const row = buildRow(s);
+    row.forEach((val, ci) => {
+      const cell = { v: val == null ? '' : val, t: 's' };
+      if (ci < 3) {
+        cell.s = idStyle;
+      } else {
+        const offsetCi = ci - 3;
+        const isYesNo = offsetCi % 2 === 0;
+        if (isYesNo) {
+          cell.s = val === 'Yes' ? yesStyle : noStyle;
+        } else {
+          cell.s = val ? descStyle : xlCellStyle({});
+        }
+      }
+      ws[XLSX.utils.encode_cell({r: ri+1, c: ci})] = cell;
+    });
+  });
+
+  const COL_WIDTHS = [22, 22, 42, 14, 55, 14, 55, 22, 55, 14, 55, 18, 55, 16, 55];
+  ws['!ref'] = XLSX.utils.encode_range({s:{c:0,r:0}, e:{c:HEADERS.length-1, r:list.length}});
+  ws['!cols'] = COL_WIDTHS.map(w => ({wch: w}));
+  ws['!rows'] = [{hpt:30}, ...list.map(() => ({hpt: 60}))];
+  ws['!freeze'] = { xSplit: 3, ySplit: 1 };
+
+  return ws;
+}
+
 // ── MAIN EXPORT FUNCTION ─────────────────────────────────────────────
 async function exportXLSX(type, agentName) {
   // Guard: SheetJS must be loaded
@@ -5054,6 +5201,10 @@ async function exportXLSX(type, agentName) {
       const ws3 = buildSheet3(list);
       XLSX.utils.book_append_sheet(wb, ws3, '👤 Ringkasan Agent');
     }
+
+    // Sheet 4: Astro QC Format (matches QC CCU 2026 Excel)
+    const ws4 = buildSheet4Astro(list);
+    XLSX.utils.book_append_sheet(wb, ws4, 'QC CCU 2026');
 
     // Write and trigger download
     XLSX.writeFile(wb, fname, {
