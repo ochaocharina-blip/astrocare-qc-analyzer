@@ -550,6 +550,8 @@ code{background:var(--surface2);color:var(--blue);padding:1px 6px;border-radius:
 @media(min-width:761px){.mob-header{display:none;}}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.1/jspdf.plugin.autotable.min.js"></script>
 </head>
 <body>
 <div class="shell">
@@ -588,6 +590,10 @@ code{background:var(--surface2);color:var(--blue);padding:1px 6px;border-radius:
       <button class="nav-item" onclick="showPage('bulk',this)">
         <span class="nav-icon">📥</span> Bulk Import
         <span class="nav-badge" id="nb-bulk">0</span>
+      </button>
+      <button class="nav-item" onclick="showPage('coaching',this)">
+        <span class="nav-icon">📑</span> Coaching Report
+        <span class="nav-badge" id="nb-coaching">0</span>
       </button>
       <button class="nav-item" onclick="showPage('reference',this)">
         <span class="nav-icon">📚</span> Reference
@@ -1011,6 +1017,32 @@ code{background:var(--surface2);color:var(--blue);padding:1px 6px;border-radius:
       </div>
     </div>
 
+    <!-- ════ COACHING REPORT PAGE ════ -->
+    <div class="page" id="page-coaching">
+      <div class="page-title">Coaching <span class="grad">Report</span></div>
+      <div class="page-sub">Download PDF coaching report per agent — siap di-share ke supervisor / SDM.</div>
+
+      <div class="hl-card" style="margin-top:14px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+          <div style="font-weight:600;color:#e8f4ff;">📋 Pilih agent untuk download report bulanan</div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input type="text" id="coachingSearch" placeholder="🔍 Cari nama agent..." style="background:rgba(255,255,255,0.05);border:1px solid #364B6B;color:#e8f4ff;border-radius:6px;padding:6px 10px;font-size:12px;width:200px;" oninput="renderCoachingList()" />
+            <button class="btn btn-primary" style="font-size:12px;padding:7px 14px;" onclick="generateAllCoachingPDFs()">📦 Download Semua (zip)</button>
+          </div>
+        </div>
+        <div id="coachingList"></div>
+      </div>
+
+      <div class="hl-card" style="margin-top:14px;background:rgba(20,40,70,0.4);">
+        <div style="font-size:12px;color:#9ab8d4;line-height:1.6;">
+          <b style="color:#e8f4ff;">📌 Tips:</b><br/>
+          • Report otomatis include: distribusi score, temuan per kategori, breakdown per tiket, math, coaching focus, & forecast<br/>
+          • Sample = semua ticket agent ybs di History (atau filter berdasarkan filter active)<br/>
+          • Cocok buat 1-on-1 coaching session bulanan
+        </div>
+      </div>
+    </div>
+
     <!-- ════ REFERENCE PAGE ════ -->
     <div class="page" id="page-reference">
       <div class="page-title">Reference <span class="grad">QC</span></div>
@@ -1217,7 +1249,37 @@ function classifyRoles(turns, manualAgentName) {
     agentTurns = autoAgent ? turns.filter(t => t.speaker && t.speaker.toLowerCase().includes(autoAgentLow)) : [];
     customerTurns = turns.filter(t => t.speaker && !t.speaker.toLowerCase().includes(autoAgentLow) && !/\b(bot|system|sistem|auto|internal)\b/i.test(t.speaker));
   }
+
+  // FIX (rev #7): HANDOVER SUPPORT — include turns from OTHER agents too
+  // If chat has 2+ distinct non-customer non-bot speakers, all should count as "agent turns"
+  // Customer = the requester (first non-agent non-bot, or longest-talking one)
   const customerLabel = customerTurns.length ? customerTurns[0].speaker : null;
+  const customerLow = (customerLabel||'').toLowerCase();
+  // Re-classify: any speaker that is NOT customer and NOT bot/system → considered agent
+  // This catches handover where 2 agents collaborate.
+  if (customerLow) {
+    const handoverAgentTurns = [];
+    const handoverCustomerTurns = [];
+    for (const t of turns) {
+      if (!t.speaker) continue; // skip bot (empty speaker)
+      const sl = t.speaker.toLowerCase();
+      if (/\b(bot|system|sistem|auto|internal|astro indonesia|astrocare|astro care)\b/i.test(sl)) continue;
+      if (sl.includes(customerLow) || customerLow.includes(sl)) {
+        handoverCustomerTurns.push(t);
+      } else {
+        handoverAgentTurns.push(t);
+      }
+    }
+    // Use handover-aware turns if we found additional agent speakers beyond original
+    const originalAgentSpeakers = new Set((agentTurns || []).map(t => (t.speaker||'').toLowerCase()).filter(Boolean));
+    const handoverAgentSpeakers = new Set(handoverAgentTurns.map(t => (t.speaker||'').toLowerCase()).filter(Boolean));
+    if (handoverAgentSpeakers.size > originalAgentSpeakers.size) {
+      // Handover detected — use combined view
+      agentTurns = handoverAgentTurns;
+      customerTurns = handoverCustomerTurns;
+    }
+  }
+
   return { agentTurns, customerTurns, agentLabel: agentLabel || '(tidak terdeteksi)', customerLabel, agentFound: agentTurns.length > 0 };
 }
 
@@ -1247,6 +1309,12 @@ function chkGreeting(agentTurns, agentText) {
     'dari astro care kami akan lakukan pengecekan atas hal ini',
     'dari astro care kami akan lakukan pengecekan atas hal ini mohon dibantu informasikan nomor invoice',
     'dari astro care kami akan lakukan pengecekan atas hal ini mohon dibantu informasikan nomor tiket',
+    // FIX (rev #2): closing template Astro juga di-whitelist sebagai valid "greeting/closing"
+    'terima kasih telah menghubungi layanan astrocare',
+    'terima kasih telah menghubungi layanan astro care',
+    'terima kasih telah menghubungi astrocare',
+    'semoga pengalaman berbelanja kakak di astro selalu menyenangkan',
+    'semoga pengalaman berbelanja kakak',
   ];
   // Normalisasi: lowercase + hapus tanda baca + collapse whitespace
   const normalized = (agentText || '')
@@ -1484,6 +1552,7 @@ function chkEmpathy(agentTurns, agentText, customerTurns, metadata) {
 
   // ── KONTEKS A: KELUHAN → Wajib empati/permintaan maaf ──
   if (ctx === 'complaint') {
+    // FIX (rev #9): tambahin pattern "Mohon maaf atas hal yang terjadi ya kak. Kami akan bantu lakukan pengecekan ke tim terkait"
     const empathyKw = [
       'mohon maaf','minta maaf','maafkan','permohonan maaf',
       ' maaf ','maaf,','maaf.','maaf ya','maaf kak','maaf pak','maaf bu',
@@ -1495,6 +1564,10 @@ function chkEmpathy(agentTurns, agentText, customerTurns, metadata) {
       'sungguh kami sesalkan','kami ikut prihatin',
       'sorry','we apologize','we understand','i understand',
       'terima kasih atas kesabaran','kami hargai kesabaran',
+      // Standard Astro complaint-response template
+      'mohon maaf atas hal yang terjadi','mohon maaf atas hal','atas hal yang terjadi ya kak',
+      'kami akan bantu lakukan pengecekan','akan bantu lakukan pengecekan',
+      'mohon kesediaannya untuk menunggu','mohon kesediaan menunggu',
     ];
     const hasEmpathy = hasAny(agentText, empathyKw) || /(?:^|\.\s+|,\s*)maaf\b/i.test(agentText);
     const evidence   = hasEmpathy ? findEvidence(agentTurns, empathyKw) : null;
@@ -1631,7 +1704,10 @@ function chkEmpathy(agentTurns, agentText, customerTurns, metadata) {
 }
 
 function chkAcknowledge(agentTurns, agentText) {
-  const keywords = ['kami akan','kami segera','kami langsung','kami bantu','kami siap bantu','kami coba bantu','kami lakukan','kami melakukan','kami cek','kami periksa','kami pastikan','kami konfirmasi','kami verifikasi','sedang kami cek','sedang kami proses','sedang diproses','kami proses','akan kami proses','segera kami proses','kami tindak lanjuti','kami tindaklanjuti','ditindaklanjuti','sudah kami catat','kami catat','kami tandai','kami follow up','kami followup','kami tangani','kami selesaikan','kami atasi','kami perbaiki','kami hubungi','kami kabari','kami informasikan','kami update','akan kami hubungi','akan kami kabari','pengecekan','lakukan pengecekan','melakukan pengecekan','kami eskalasi','kami escalasi','kami sampaikan ke tim'];
+  // FIX (rev #6): tambahin pattern "akan konfirmasi terlebih dahulu kepada tim terkait"
+  const keywords = ['kami akan','kami segera','kami langsung','kami bantu','kami siap bantu','kami coba bantu','kami lakukan','kami melakukan','kami cek','kami periksa','kami pastikan','kami konfirmasi','kami verifikasi','sedang kami cek','sedang kami proses','sedang diproses','kami proses','akan kami proses','segera kami proses','kami tindak lanjuti','kami tindaklanjuti','ditindaklanjuti','sudah kami catat','kami catat','kami tandai','kami follow up','kami followup','kami tangani','kami selesaikan','kami atasi','kami perbaiki','kami hubungi','kami kabari','kami informasikan','kami update','akan kami hubungi','akan kami kabari','pengecekan','lakukan pengecekan','melakukan pengecekan','kami eskalasi','kami escalasi','kami sampaikan ke tim',
+    'akan konfirmasi terlebih dahulu','konfirmasi terlebih dahulu','konfirmasi ke tim','konfirmasi kepada tim','akan konfirmasi ke','akan kami konfirmasi','mohon kesediaan menunggu','mohon kesediaannya menunggu','mohon kesediaannya untuk menunggu','mohon kesediaan untuk menunggu',
+    'akan saya cek','saya cek dulu','saya akan cek','akan saya bantu','saya bantu','saya tindak lanjuti','akan saya proses','saya proses dulu','saya periksa dulu',];
   const pass     = hasAny(agentText, keywords);
   const evidenceTurn = pass ? agentTurns.find(t => keywords.some(kw => t.text.toLowerCase().includes(kw))) : null;
   const evidence = pass ? findEvidence(agentTurns, keywords) : null;
@@ -1712,6 +1788,7 @@ function chkSolutionContextual(agentTurns, agentText, customerTurns, metadata) {
   ];
 
   // Tindakan konkret untuk COMPLAINT
+  // FIX (rev #10): SLA pengiriman ga bisa ditentukan agent → "prioritaskan dan maksimalkan" sudah valid
   const ACTION_KW = [
     'refund','pengembalian dana','mengembalikan dana','dana dikembalikan',
     'dana kembali','proses pengembalian','kembalikan dana',
@@ -1727,6 +1804,10 @@ function chkSolutionContextual(agentTurns, agentText, customerTurns, metadata) {
     'kami proses','sudah diproses','segera diproses','akan kami proses',
     'kami bantu selesaikan','kami bantu atasi','kami tindak lanjuti',
     'kami follow up','penyelesaian','langkah penyelesaian',
+    // SLA pengiriman — agent ga bisa prediksi tapi commit upaya
+    'akan kami prioritaskan','kami prioritaskan','kami maksimalkan','akan kami maksimalkan',
+    'prioritaskan dan maksimalkan','kami upayakan','akan kami upayakan','kami pastikan dikirim',
+    'akan kami koordinasikan dengan tim hub','kami koordinasikan ke tim hub','konfirmasi ke tim hub',
   ];
 
   // Indikator informasi TIDAK LENGKAP (hanya untuk #LessInfo)
@@ -2215,11 +2296,20 @@ function chkRequiredFollowup(agentText, agentTurns) {
 //   - Customer silent tapi agent tunggu ≥10 menit → PASS
 // FAIL: customer silent + agent closing dalam < 10 menit
 function chkClosingWait(agentTurns, customerTurns, rawText, agentLabel) {
-  if (!rawText || !agentLabel) return { pass: true, label:'Closing Wait (10 menit)', tag:'#ClosingTooSoon', deduct: 10, evidence:null, detail:'Tidak ada data waktu yang cukup untuk dievaluasi.' };
-  const agentLow = String(agentLabel).toLowerCase();
+  // FIX (rev #3): threshold 10 menit → 30 menit
+  // FIX (rev #4): customer reply "cukup/sudah/tidak/ga ada" → langsung pass (boleh closing)
+  // FIX (rev #7): handover-friendly — gunakan ALL non-customer non-bot speakers sebagai "agent"
+  const THRESHOLD_MIN = 30;
+  if (!rawText) return { pass: true, label:'Closing Wait (30 menit)', tag:'#ClosingTooSoon', deduct: 10, evidence:null, detail:'Tidak ada data waktu yang cukup untuk dievaluasi.' };
 
-  // Parse setiap baris yang punya timestamp + tipe pengirim
-  const SYS_PATTERNS = /(\(system\)|chat\s*bot|messaging session|session ended|chat ended|sesi berakhir)/i;
+  // Detect all agent speaker names from agentTurns (handover support)
+  const agentSpeakers = new Set();
+  for (const t of (agentTurns || [])) {
+    if (t.speaker) agentSpeakers.add(t.speaker.toLowerCase());
+  }
+  if (agentLabel) agentSpeakers.add(String(agentLabel).toLowerCase());
+
+  const SYS_PATTERNS = /(\(system\)|chat\s*bot|messaging session|session ended|chat ended|sesi berakhir|astro indonesia|astrocare|astro care)/i;
   const lines = rawText.split('\n');
   const timed = [];
   for (const raw of lines) {
@@ -2227,13 +2317,15 @@ function chkClosingWait(agentTurns, customerTurns, rawText, agentLabel) {
     if (!tsm) continue;
     const minutes = parseInt(tsm[1])*60 + parseInt(tsm[2]) + (parseInt(tsm[3]||0)/60);
     const low = raw.toLowerCase();
-    const isAgent  = low.includes(agentLow);
-    const isSys    = SYS_PATTERNS.test(low);
+    let isAgent = false;
+    for (const name of agentSpeakers) {
+      if (name && low.includes(name)) { isAgent = true; break; }
+    }
+    const isSys = SYS_PATTERNS.test(low);
     timed.push({ raw, low, minutes, isAgent: isAgent && !isSys, isSys });
   }
-  if (timed.length < 2) return { pass: true, label:'Closing Wait (10 menit)', tag:'#ClosingTooSoon', deduct: 10, evidence:null, detail:'Tidak ada timestamp untuk evaluasi.' };
+  if (timed.length < 2) return { pass: true, label:'Closing Wait (30 menit)', tag:'#ClosingTooSoon', deduct: 10, evidence:null, detail:'Tidak ada timestamp untuk evaluasi.' };
 
-  // Pola follow-up question yang dipakai agent sebelum closing
   const FOLLOWUP_Q = [
     'perihal layanan astro lainnya',
     'ada lagi yang bisa',
@@ -2245,55 +2337,56 @@ function chkClosingWait(agentTurns, customerTurns, rawText, agentLabel) {
     'ada yang ingin',
     'ada yang perlu',
   ];
-  // Closing template (kalimat penutup standar)
   const CLOSING_TEMPLATE = [
     'terima kasih telah menghubungi',
     'semoga pengalaman berbelanja',
     'have a nice',
     'sampai jumpa',
   ];
+  // FIX (#4): customer satisfaction signals — agent boleh langsung closing
+  const SATISFIED_KW = [
+    'cukup','sudah cukup','udah cukup','tidak ada','ngga ada','ga ada','enggak ada','no more','tidak','ngga','tidak perlu',
+    'sudah kak','sudah','udah','ok','okee','okay','siap','baik','ya','terima kasih','makasih','thanks','done','beres',
+  ];
 
   function hasAny(low, arr) { return arr.some(p => low.includes(p)); }
 
-  // Cari follow-up question dari agent (skip kalau dari system/bot)
   for (let i = 0; i < timed.length; i++) {
     const fu = timed[i];
     if (!fu.isAgent) continue;
     if (!hasAny(fu.low, FOLLOWUP_Q)) continue;
 
-    // Setelah follow-up question, scan ke depan
     let customerReplied = false;
+    let customerSatisfied = false;
     for (let j = i + 1; j < timed.length; j++) {
       const nxt = timed[j];
-      if (nxt.isSys) continue; // skip system/bot lines
+      if (nxt.isSys) continue;
       if (nxt.minutes < fu.minutes) continue;
       if (!nxt.isAgent) {
-        // Pesan dari non-agent dan non-system → customer membalas
         customerReplied = true;
-        break; // boleh closing langsung
+        // FIX (#4): cek kalau customer reply nampilin satisfaction
+        if (hasAny(nxt.low, SATISFIED_KW)) customerSatisfied = true;
+        break;
       }
-      // Pesan agent — cek apakah closing template
       if (hasAny(nxt.low, CLOSING_TEMPLATE)) {
         const waitMin = nxt.minutes - fu.minutes;
-        if (waitMin < 10 && !customerReplied) {
-          // VIOLATION
+        if (waitMin < THRESHOLD_MIN && !customerReplied) {
           const fuSnippet = fu.raw.trim().replace(/\s+/g, ' ').slice(0, 140);
           const closeSnippet = nxt.raw.trim().replace(/\s+/g, ' ').slice(0, 100);
           return {
             pass: false,
-            label: 'Closing Wait (10 menit)',
+            label: 'Closing Wait (30 menit)',
             tag: '#ClosingTooSoon',
             deduct: 10,
             evidence: '"' + fuSnippet + '"  →  ' + waitMin.toFixed(1) + ' menit kemudian agent langsung closing: "' + closeSnippet + '"',
-            detail: 'Agent tanya follow-up tapi customer tidak merespons. Agent langsung mengirim closing template hanya ' + waitMin.toFixed(1) + ' menit kemudian. Aturan: tunggu minimal 10 menit jika customer silent.',
+            detail: `Agent tanya follow-up tapi customer tidak merespons. Agent langsung mengirim closing template hanya ${waitMin.toFixed(1)} menit kemudian. Aturan: tunggu minimal ${THRESHOLD_MIN} menit jika customer silent (atau langsung closing kalau customer reply "cukup/tidak ada").`,
           };
         }
       }
-      // Pesan agent lain selain closing — abaikan, lanjut scan
     }
   }
 
-  return { pass: true, label:'Closing Wait (10 menit)', tag:'#ClosingTooSoon', deduct: 10, evidence:null, detail:'Closing dilakukan setelah customer merespon atau setelah tunggu ≥10 menit.' };
+  return { pass: true, label:`Closing Wait (${THRESHOLD_MIN} menit)`, tag:'#ClosingTooSoon', deduct: 10, evidence:null, detail:`Closing dilakukan setelah customer merespon (termasuk "cukup/tidak ada"), atau setelah tunggu ≥${THRESHOLD_MIN} menit.` };
 }
 
 function chkTypo(agentTurns, agentLabel) {
@@ -5308,6 +5401,386 @@ function showPage(id, btn) {
   if (id==='recap-all')   renderRecapAll();
   if (id==='export')      renderExportPreview();
   if (id==='reference')   initReferencePage();
+  if (id==='coaching')    renderCoachingList();
+}
+
+// ════════════════════════════════════════════════
+// COACHING REPORT PDF GENERATOR
+// ════════════════════════════════════════════════
+
+// Map QC engine tag → Astro Score Card category
+const COACHING_CATEGORY_MAP = {
+  '#ImproperGreeting': 'Service Attitude',
+  '#Typo': 'Service Attitude',
+  '#Jargon': 'Service Attitude',
+  '#Apathy': 'Service Attitude',
+  '#Impolite': 'Service Attitude',
+  '#MandatoryProb': 'Probing',
+  '#RedundantQuestion': 'Probing',
+  '#Historical': 'Problem Comprehension',
+  '#NotAcknowledge': 'Problem Comprehension',
+  '#ClosingMssge': 'Problem Comprehension',
+  '#LessInfo': 'Solution',
+  '#WordingJaminanGaransi': 'Solution',
+  '#WrongInfo': 'Solution',
+  '#WrongEscalation': 'Solution',
+  '#NoEscalation': 'Solution',
+  '#NoNeedEscalation': 'Solution',
+  '#InvalidDataEscalation': 'Solution',
+  '#MissingFollowup': 'Solution',
+  '#EstimationMissing': 'Solution',
+  '#MandatoryField': 'Tools & Procedures',
+  '#OrderDetail': 'Tools & Procedures',
+  '#CaseDetail': 'Tools & Procedures',
+  '#ClosingTooSoon': 'Tools & Procedures',
+  '#IdleTimeout': 'Tools & Procedures',
+  '#FinancialLost': 'Zero Tolerance',
+  '#KPIManipulations': 'Zero Tolerance',
+  '#PrivacyPolicies': 'Zero Tolerance',
+  '#11Attitude': 'Zero Tolerance',
+  '#Rude': 'Zero Tolerance',
+};
+
+function getCoachingAgentsList() {
+  // Group sessions by agent
+  const map = {};
+  for (const s of sessions || []) {
+    const name = (s.agentName || '').trim();
+    if (!name) continue;
+    if (!map[name]) map[name] = [];
+    map[name].push(s);
+  }
+  return Object.entries(map)
+    .map(([name, list]) => {
+      const scores = list.map(s => s.totalScore ?? 0);
+      const avg = scores.length ? Math.round(scores.reduce((a,b)=>a+b,0) / scores.length * 100) / 100 : 0;
+      const perfect = scores.filter(s => s === 100).length;
+      const fail = scores.filter(s => s < 60).length;
+      return { name, count: list.length, avg, perfect, fail, sessions: list };
+    })
+    .sort((a,b) => b.count - a.count);
+}
+
+function renderCoachingList() {
+  const wrap = document.getElementById('coachingList');
+  if (!wrap) return;
+  const search = (document.getElementById('coachingSearch')?.value || '').toLowerCase();
+  let agents = getCoachingAgentsList();
+  if (search) agents = agents.filter(a => a.name.toLowerCase().includes(search));
+
+  // Update badge
+  const badge = document.getElementById('nb-coaching');
+  if (badge) badge.textContent = agents.length;
+
+  if (!agents.length) {
+    wrap.innerHTML = '<div style="padding:30px;text-align:center;color:#9ab8d4;">Belum ada data agent. Lakukan analisis ticket dulu di menu <b>Analyze</b> atau <b>Bulk Import</b>.</div>';
+    return;
+  }
+
+  let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;">';
+  for (const a of agents) {
+    const verdict = a.avg >= 95 ? 'Excellent' : a.avg >= 80 ? 'Good' : a.avg >= 60 ? 'Marginal' : 'Fail';
+    const color = a.avg >= 95 ? '#0A6640' : a.avg >= 80 ? '#0A6640' : a.avg >= 60 ? '#7A4800' : '#8B0000';
+    const bg = a.avg >= 95 ? 'rgba(29,184,122,0.15)' : a.avg >= 80 ? 'rgba(29,184,122,0.1)' : a.avg >= 60 ? 'rgba(230,168,23,0.15)' : 'rgba(224,48,48,0.15)';
+    html += `
+      <div style="background:${bg};border:1px solid #364B6B;border-radius:8px;padding:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <div style="font-weight:600;color:#e8f4ff;font-size:14px;">${escHTML(a.name)}</div>
+          <div style="font-weight:700;font-size:18px;color:${color};">${a.avg}</div>
+        </div>
+        <div style="font-size:11px;color:#9ab8d4;margin-bottom:10px;">
+          ${a.count} ticket · ${a.perfect} perfect · ${a.fail} fail · <span style="color:${color};font-weight:600;">${verdict}</span>
+        </div>
+        <button class="btn btn-primary" style="font-size:11px;padding:6px 12px;width:100%;" onclick='generateCoachingPDF(${JSON.stringify(a.name)})'>📑 Download Report PDF</button>
+      </div>`;
+  }
+  html += '</div>';
+  wrap.innerHTML = html;
+}
+
+function escHTML(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function stripTextHTML(s) {
+  if (!s) return '';
+  return String(s).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function generateCoachingPDF(agentName) {
+  if (typeof window.jspdf === 'undefined') {
+    showToast('Library jsPDF belum termuat.', '⚠');
+    return;
+  }
+  const list = (sessions || []).filter(s => (s.agentName || '').trim() === agentName);
+  if (!list.length) { showToast('Data agent tidak ditemukan.', '⚠'); return; }
+
+  showToast('Sedang generate PDF...', '⏳');
+
+  // Sort by date asc
+  list.sort((a,b) => new Date(a.createdAt||a.date||0) - new Date(b.createdAt||b.date||0));
+
+  const scores = list.map(s => s.totalScore ?? 0);
+  const total = scores.reduce((a,b)=>a+b, 0);
+  const avg = scores.length ? Math.round(total / scores.length * 100) / 100 : 0;
+  const perfect = scores.filter(s => s === 100).length;
+  const passC = scores.filter(s => s >= 80 && s < 100).length;
+  const marg = scores.filter(s => s >= 60 && s < 80).length;
+  const failC = scores.filter(s => s < 60).length;
+  const verdict = avg >= 95 ? 'EXCELLENT' : avg >= 80 ? 'GOOD' : avg >= 60 ? 'MARGINAL' : 'FAIL';
+  const verdictColor = avg >= 95 ? '#0A6640' : avg >= 80 ? '#0A6640' : avg >= 60 ? '#7A4800' : '#8B0000';
+
+  // Categorize findings
+  const byCategory = {};
+  const CATS = ['Service Attitude','Probing','Problem Comprehension','Solution','Tools & Procedures','Zero Tolerance'];
+  CATS.forEach(c => byCategory[c] = []);
+  for (const s of list) {
+    const viols = [...(s.violations||[]), ...((s.aiResult&&s.aiResult.violations)||[])];
+    for (const v of viols) {
+      if (v.pass === true) continue;
+      const tag = v.tag || v.hashtag;
+      if (!tag) continue;
+      const cat = COACHING_CATEGORY_MAP[tag];
+      if (!cat) continue;
+      byCategory[cat].push({
+        ticket: s.ticketNumber || s.invoice || '—',
+        tag,
+        detail: stripTextHTML(v.detail || v.label || ''),
+        evidence: stripTextHTML(v.evidence || '').substring(0, 200),
+      });
+    }
+  }
+
+  // Determine sample period from dates
+  const dates = list.map(s => new Date(s.createdAt || s.date || Date.now()));
+  const minDate = new Date(Math.min(...dates));
+  const maxDate = new Date(Math.max(...dates));
+  const period = `${minDate.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'})} - ${maxDate.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'})}`;
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  let y = 18;
+
+  // ═══ Header ═══
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(20);
+  doc.setTextColor(26, 84, 144);
+  doc.text('QC Coaching Report', 18, y);
+  y += 8;
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(9);
+  doc.setTextColor(88, 96, 105);
+  doc.text(`Agent: ${agentName}  |  Periode: ${period}  |  Sample: ${list.length} ticket  |  Generated: ${new Date().toLocaleString('id-ID',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})} WIB`, 18, y);
+  y += 8;
+
+  // ═══ Headline score box ═══
+  doc.setFillColor(26, 84, 144);
+  doc.rect(18, y, pageW-36, 8, 'F');
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(9);
+  doc.setTextColor(255,255,255);
+  const colW = (pageW - 36) / 4;
+  doc.text('AVERAGE SCORE', 18 + colW/2, y+5.5, {align:'center'});
+  doc.text('STATUS', 18 + colW*1.5, y+5.5, {align:'center'});
+  doc.text('PERFECT', 18 + colW*2.5, y+5.5, {align:'center'});
+  doc.text('FAIL', 18 + colW*3.5, y+5.5, {align:'center'});
+  y += 8;
+
+  doc.setFillColor(245, 248, 251);
+  doc.rect(18, y, pageW-36, 14, 'F');
+  doc.setFontSize(18);
+  doc.setTextColor(26, 84, 144);
+  doc.text(`${avg}`, 18 + colW/2, y+9, {align:'center'});
+  doc.setFontSize(12);
+  const [vR,vG,vB] = verdict==='EXCELLENT'||verdict==='GOOD' ? [10,102,64] : verdict==='MARGINAL' ? [122,72,0] : [139,0,0];
+  doc.setTextColor(vR, vG, vB);
+  doc.text(verdict, 18 + colW*1.5, y+9, {align:'center'});
+  doc.setTextColor(10, 102, 64);
+  doc.setFontSize(14);
+  doc.text(`${perfect} / ${list.length}`, 18 + colW*2.5, y+9, {align:'center'});
+  doc.setTextColor(139, 0, 0);
+  doc.text(`${failC} / ${list.length}`, 18 + colW*3.5, y+9, {align:'center'});
+  y += 18;
+
+  // ═══ Section 1: Distribution ═══
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(13);
+  doc.setTextColor(26, 84, 144);
+  doc.text('1. Distribusi Score per Ticket', 18, y);
+  y += 2;
+
+  doc.autoTable({
+    startY: y + 2,
+    head: [['Score Range', 'Jumlah', '%', 'Verdict']],
+    body: [
+      ['100 (Perfect)', perfect, ((perfect/list.length)*100).toFixed(0)+'%', 'PASS Excellent'],
+      ['80-99', passC, ((passC/list.length)*100).toFixed(0)+'%', 'PASS dengan minor finding'],
+      ['60-79', marg, ((marg/list.length)*100).toFixed(0)+'%', 'PASS Marginal'],
+      ['<60 (Fail)', failC, ((failC/list.length)*100).toFixed(0)+'%', 'FAIL'],
+    ],
+    headStyles: { fillColor: [26,84,144], fontSize: 9, halign: 'center' },
+    styles: { fontSize: 9, halign: 'left' },
+    columnStyles: { 1:{halign:'center'}, 2:{halign:'center'} },
+    margin: { left: 18, right: 18 },
+  });
+  y = doc.lastAutoTable.finalY + 8;
+
+  // ═══ Section 2: Findings per Category ═══
+  if (y > pageH - 50) { doc.addPage(); y = 18; }
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(13);
+  doc.setTextColor(26, 84, 144);
+  doc.text('2. Temuan per Kategori (per Score Card PDF)', 18, y);
+  y += 4;
+
+  for (const cat of CATS) {
+    const findings = byCategory[cat];
+    const passStatus = findings.length === 0 ? '100% Pass' : `${findings.length} Fail`;
+    const headColor = findings.length === 0 ? [10,102,64] : [122,72,0];
+
+    if (y > pageH - 30) { doc.addPage(); y = 18; }
+
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(10);
+    doc.setTextColor(...headColor);
+    doc.text(`${cat} — ${passStatus}`, 18, y);
+    y += 3;
+
+    if (findings.length > 0) {
+      doc.autoTable({
+        startY: y + 2,
+        head: [['Ticket', 'Tag', 'Detail Temuan']],
+        body: findings.map(f => [f.ticket, f.tag, (f.evidence ? `"${f.evidence}" — ` : '') + f.detail]),
+        headStyles: { fillColor: [26,84,144], fontSize: 8.5, halign: 'left' },
+        styles: { fontSize: 8.5, valign: 'top', cellPadding: 2 },
+        columnStyles: { 0:{cellWidth:30}, 1:{cellWidth:35}, 2:{cellWidth:'auto'} },
+        margin: { left: 18, right: 18 },
+        didParseCell: function(data) {
+          if (data.section === 'body') data.cell.styles.fillColor = [255, 244, 214];
+        },
+      });
+      y = doc.lastAutoTable.finalY + 6;
+    } else {
+      doc.setFont('helvetica','normal');
+      doc.setFontSize(9);
+      doc.setTextColor(60, 60, 60);
+      doc.text('Tidak ada temuan di kategori ini.', 22, y+4);
+      y += 8;
+    }
+  }
+
+  // ═══ Section 3: Score Breakdown per Ticket ═══
+  doc.addPage();
+  y = 18;
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(13);
+  doc.setTextColor(26, 84, 144);
+  doc.text('3. Score Breakdown per Ticket', 18, y);
+  y += 4;
+
+  const breakdownBody = list.map((s, i) => {
+    const d = new Date(s.createdAt || s.date || Date.now());
+    return [
+      String(i+1),
+      d.toLocaleDateString('id-ID', {day:'2-digit',month:'2-digit'}),
+      (s.ticketNumber || s.invoice || '—').substring(0,22),
+      String(s.totalScore ?? 0),
+    ];
+  });
+
+  doc.autoTable({
+    startY: y + 2,
+    head: [['#', 'Date', 'Ticket', 'Score']],
+    body: breakdownBody,
+    headStyles: { fillColor: [26,84,144], fontSize: 9, halign: 'center' },
+    styles: { fontSize: 8.5, halign: 'left' },
+    columnStyles: { 0:{halign:'center',cellWidth:10}, 1:{halign:'center',cellWidth:18}, 3:{halign:'center',cellWidth:18,fontStyle:'bold'} },
+    margin: { left: 18, right: 18 },
+  });
+  y = doc.lastAutoTable.finalY + 6;
+
+  // ═══ Section 4: Coaching Focus ═══
+  if (y > pageH - 60) { doc.addPage(); y = 18; }
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(13);
+  doc.setTextColor(26, 84, 144);
+  doc.text('4. Coaching Focus — Action Plan', 18, y);
+  y += 5;
+
+  // Top finding pattern
+  const allFindings = Object.values(byCategory).flat();
+  const tagFreq = {};
+  for (const f of allFindings) tagFreq[f.tag] = (tagFreq[f.tag] || 0) + 1;
+  const topTags = Object.entries(tagFreq).sort((a,b) => b[1]-a[1]).slice(0, 3);
+
+  if (topTags.length === 0) {
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(10);
+    doc.setTextColor(60, 60, 60);
+    doc.text('🎉 Tidak ada temuan signifikan. Performance sudah excellent — pertahankan!', 18, y);
+    y += 8;
+  } else {
+    for (let i = 0; i < topTags.length; i++) {
+      const [tag, freq] = topTags[i];
+      const pct = ((freq/list.length)*100).toFixed(0);
+      const priority = i === 0 ? 'Prioritas #1' : i === 1 ? 'Prioritas #2' : 'Prioritas #3';
+      if (y > pageH - 20) { doc.addPage(); y = 18; }
+      doc.setFont('helvetica','bold');
+      doc.setFontSize(11);
+      doc.setTextColor(30, 30, 30);
+      doc.text(`${priority} — ${tag}`, 18, y);
+      y += 5;
+      doc.setFont('helvetica','normal');
+      doc.setFontSize(9);
+      doc.setTextColor(60, 60, 60);
+      doc.text(`Severity: ${freq} dari ${list.length} ticket (${pct}%)`, 18, y);
+      y += 5;
+      doc.text('Action: 1-on-1 coaching session, review ticket examples, role play, follow-up audit bulan depan.', 18, y, {maxWidth: pageW - 36});
+      y += 8;
+    }
+  }
+
+  // ═══ Section 5: Insight & Forecast ═══
+  if (y > pageH - 35) { doc.addPage(); y = 18; }
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(13);
+  doc.setTextColor(26, 84, 144);
+  doc.text('5. Insight & Forecast', 18, y);
+  y += 6;
+
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(9);
+  doc.setTextColor(60, 60, 60);
+  const insight = `Status saat ini: ${verdict} (${avg}). ` +
+    (avg >= 95 ? 'Performance excellent. Pertahankan pola kerja & jadi mentor untuk agent lain.' :
+     avg >= 80 ? 'Performance baik. Coaching ringan untuk area yg masih bermasalah.' :
+     avg >= 60 ? 'Marginal. Coaching intensif diperlukan, terutama pada pattern yg paling sering muncul.' :
+     'Performance below standard. Coaching urgent + 1-on-1 review WAJIB dilakukan supervisor.');
+  doc.text(insight, 18, y, {maxWidth: pageW - 36});
+
+  // Footer on last page
+  y = pageH - 12;
+  doc.setFont('helvetica','italic');
+  doc.setFontSize(8);
+  doc.setTextColor(88, 96, 105);
+  doc.text(`Generated by AstroCare QC Analyzer · ${new Date().toLocaleString('id-ID')} WIB`, 18, y);
+
+  // Save file
+  const safeName = agentName.replace(/[^\w]+/g,'_');
+  doc.save(`QC_Coaching_${safeName}_${new Date().toISOString().split('T')[0]}.pdf`);
+  showToast(`PDF report ${agentName} berhasil di-download`, '📑');
+}
+
+async function generateAllCoachingPDFs() {
+  const agents = getCoachingAgentsList();
+  if (!agents.length) { showToast('Tidak ada agent.', '⚠'); return; }
+  showToast(`Generate ${agents.length} report...`, '⏳');
+  for (const a of agents) {
+    generateCoachingPDF(a.name);
+    await new Promise(r => setTimeout(r, 600));
+  }
 }
 
 // ══════════════════════════════════════════════
